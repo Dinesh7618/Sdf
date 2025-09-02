@@ -1,0 +1,448 @@
+#ifdef GL_ES
+precision mediump float;
+#endif
+
+uniform vec2 u_resolution;
+uniform float u_time;
+
+// ---------- Helpers ----------
+const float PI = 3.14159265358979323846;
+
+mat2 rot(float a){ float c = cos(a), s = sin(a); return mat2(c,-s,s,c); }
+
+float sdCircle(vec2 p, float r){ return length(p) - r; }
+float sdBox(vec2 p, vec2 b){
+    vec2 q = abs(p) - b;
+    return length(max(q, 0.0)) + min(max(q.x, q.y), 0.0);
+}
+float sdRoundBox(vec2 p, vec2 b, float rad){
+    vec2 q = abs(p) - b + vec2(rad);
+    return length(max(q, 0.0)) - rad + min(max(q.x, q.y), 0.0);
+}
+
+// radial wavy circle: r' = r + amp * cos(n*theta + phase)
+float sdWavyCircle(vec2 p, float r, float n, float amp, float phase){
+    float theta = atan(p.y, p.x);
+    float modR = r + amp * cos(n * theta + phase);
+    return length(p) - modR;
+}
+
+// sharp star/burst: spikes via cos, sharpened by pow
+float sdStar(vec2 p, float r, float spikes, float spikeAmp, float phase){
+    float a = atan(p.y, p.x);
+    float m = cos(spikes * a + phase);
+    float spike = spikeAmp * sign(m) * pow(abs(m), 0.6);
+    return length(p) - (r + spike);
+}
+
+// smooth union (blend factor k)
+float opSmoothUnion(float a, float b, float k){
+    float h = clamp(0.5 + 0.5*(b-a)/k, 0.0, 1.0);
+    return mix(b, a, h) - k*h*(1.0-h);
+}
+
+// anti-aliased step (using screen-space derivative)
+float AA(float d){
+    float fw = fwidth(d);
+    return smoothstep(fw, -fw, d);
+}
+
+// ---------- Main animated shape SDF ----------
+// This function blends between two SDFs over time to create the morphing effect.
+float sdAnimatedMorph(vec2 p, float time){
+    // rotate slowly
+    float rotSpeed = 0.25;
+    p *= rot(time * rotSpeed);
+
+    // base radius
+    float baseR = 0.33;
+
+    // time-varying parameters
+    float t1 = sin(time * 1.2) * 0.5 + 0.5;           // 0..1 oscillator
+    float phase = time * 1.8;                         // rotates bumps
+    float ampCookie = mix(0.04, 0.10, t1);            // cookie amplitude
+    float nCookie = mix(6.0, 12.0, t1);               // cookie petals
+
+    float spikes = mix(10.0, 20.0, 1.0 - t1);         // burst spikes
+    float spikeAmp = mix(0.06, 0.16, 1.0 - t1);
+
+    // two SDFs
+    float wavy = sdWavyCircle(p, baseR, nCookie, ampCookie, phase);
+    float star = sdStar(p, baseR, spikes, spikeAmp, phase*0.6);
+
+    // smooth blend between them based on another slow oscillator
+    float blend = 0.5 + 0.5 * sin(time * 0.9 + 0.3);
+    float d = opSmoothUnion(wavy, star, 0.06 * (1.0 - blend) + 0.01);
+
+    // small inner indent to match the slightly flattened look in the reference
+    // (subtract a small flattened circle on bottom to get "pill-like" bottom)
+    float flatten = p.y + 0.05; // positive above, negative below
+    d = max(d, flatten);
+
+    return d;
+}
+
+// ---------- Fragment main ----------
+void main(){
+    // normalized coordinates centered at (0,0)
+    vec2 uv = (gl_FragCoord.xy - 0.5 * u_resolution.xy) / u_resolution.y;
+
+    // get SDF
+    float d = sdAnimatedMorph(uv, u_time);
+
+    // alpha with anti-aliasing
+    float a = AA(d);
+
+    // color setup (exact matches from the video)
+    vec3 shapeColor = vec3(76.0/255.0, 51.0/255.0, 122.0/255.0); // main purple
+    vec3 accent = vec3(133.0/255.0,108.0/255.0,180.0/255.0);    // accent (unused by default)
+    vec3 bg = vec3(244.0/255.0,237.0/255.0,249.0/255.0);        // pale background
+
+    // lighting-like subtle rim: compute approximate normal from SDF and add very small rim
+    vec2 eps = vec2(0.001, 0.0);
+    float dx = sdAnimatedMorph(uv + eps.xy, u_time) - sdAnimatedMorph(uv - eps.xy, u_time);
+    float dy = sdAnimatedMorph(uv + eps.yx, u_time) - sdAnimatedMorph(uv - eps.yx, u_time);
+    vec3 N = normalize(vec3(dx, dy, 0.0001));
+    float rim = pow(1.0 - max(0.0, dot(N, vec3(0.0,1.0,0.0))), 3.0) * 0.06;
+
+    // final color: mix background and shape
+    vec3 col = mix(bg, shapeColor + rim * accent, a);
+
+    gl_FragColor = vec4(col, 1.0);
+}
+#ifdef GL_ES
+precision mediump float;
+#endif
+
+uniform vec2 u_resolution;
+uniform float u_time;
+
+// ---------- Helpers ----------
+const float PI = 3.14159265358979323846;
+
+mat2 rot(float a){ float c = cos(a), s = sin(a); return mat2(c,-s,s,c); }
+
+float sdCircle(vec2 p, float r){ return length(p) - r; }
+float sdBox(vec2 p, vec2 b){
+    vec2 q = abs(p) - b;
+    return length(max(q, 0.0)) + min(max(q.x, q.y), 0.0);
+}
+float sdRoundBox(vec2 p, vec2 b, float rad){
+    vec2 q = abs(p) - b + vec2(rad);
+    return length(max(q, 0.0)) - rad + min(max(q.x, q.y), 0.0);
+}
+
+// radial wavy circle: r' = r + amp * cos(n*theta + phase)
+float sdWavyCircle(vec2 p, float r, float n, float amp, float phase){
+    float theta = atan(p.y, p.x);
+    float modR = r + amp * cos(n * theta + phase);
+    return length(p) - modR;
+}
+
+// sharp star/burst: spikes via cos, sharpened by pow
+float sdStar(vec2 p, float r, float spikes, float spikeAmp, float phase){
+    float a = atan(p.y, p.x);
+    float m = cos(spikes * a + phase);
+    float spike = spikeAmp * sign(m) * pow(abs(m), 0.6);
+    return length(p) - (r + spike);
+}
+
+// smooth union (blend factor k)
+float opSmoothUnion(float a, float b, float k){
+    float h = clamp(0.5 + 0.5*(b-a)/k, 0.0, 1.0);
+    return mix(b, a, h) - k*h*(1.0-h);
+}
+
+// anti-aliased step (using screen-space derivative)
+float AA(float d){
+    float fw = fwidth(d);
+    return smoothstep(fw, -fw, d);
+}
+
+// ---------- Main animated shape SDF ----------
+// This function blends between two SDFs over time to create the morphing effect.
+float sdAnimatedMorph(vec2 p, float time){
+    // rotate slowly
+    float rotSpeed = 0.25;
+    p *= rot(time * rotSpeed);
+
+    // base radius
+    float baseR = 0.33;
+
+    // time-varying parameters
+    float t1 = sin(time * 1.2) * 0.5 + 0.5;           // 0..1 oscillator
+    float phase = time * 1.8;                         // rotates bumps
+    float ampCookie = mix(0.04, 0.10, t1);            // cookie amplitude
+    float nCookie = mix(6.0, 12.0, t1);               // cookie petals
+
+    float spikes = mix(10.0, 20.0, 1.0 - t1);         // burst spikes
+    float spikeAmp = mix(0.06, 0.16, 1.0 - t1);
+
+    // two SDFs
+    float wavy = sdWavyCircle(p, baseR, nCookie, ampCookie, phase);
+    float star = sdStar(p, baseR, spikes, spikeAmp, phase*0.6);
+
+    // smooth blend between them based on another slow oscillator
+    float blend = 0.5 + 0.5 * sin(time * 0.9 + 0.3);
+    float d = opSmoothUnion(wavy, star, 0.06 * (1.0 - blend) + 0.01);
+
+    // small inner indent to match the slightly flattened look in the reference
+    // (subtract a small flattened circle on bottom to get "pill-like" bottom)
+    float flatten = p.y + 0.05; // positive above, negative below
+    d = max(d, flatten);
+
+    return d;
+}
+
+// ---------- Fragment main ----------
+void main(){
+    // normalized coordinates centered at (0,0)
+    vec2 uv = (gl_FragCoord.xy - 0.5 * u_resolution.xy) / u_resolution.y;
+
+    // get SDF
+    float d = sdAnimatedMorph(uv, u_time);
+
+    // alpha with anti-aliasing
+    float a = AA(d);
+
+    // color setup (exact matches from the video)
+    vec3 shapeColor = vec3(76.0/255.0, 51.0/255.0, 122.0/255.0); // main purple
+    vec3 accent = vec3(133.0/255.0,108.0/255.0,180.0/255.0);    // accent (unused by default)
+    vec3 bg = vec3(244.0/255.0,237.0/255.0,249.0/255.0);        // pale background
+
+    // lighting-like subtle rim: compute approximate normal from SDF and add very small rim
+    vec2 eps = vec2(0.001, 0.0);
+    float dx = sdAnimatedMorph(uv + eps.xy, u_time) - sdAnimatedMorph(uv - eps.xy, u_time);
+    float dy = sdAnimatedMorph(uv + eps.yx, u_time) - sdAnimatedMorph(uv - eps.yx, u_time);
+    vec3 N = normalize(vec3(dx, dy, 0.0001));
+    float rim = pow(1.0 - max(0.0, dot(N, vec3(0.0,1.0,0.0))), 3.0) * 0.06;
+
+    // final color: mix background and shape
+    vec3 col = mix(bg, shapeColor + rim * accent, a);
+
+    gl_FragColor = vec4(col, 1.0);
+}
+#ifdef GL_ES
+precision mediump float;
+#endif
+
+uniform vec2 u_resolution;
+uniform float u_time;
+
+// ---------- Helpers ----------
+const float PI = 3.14159265358979323846;
+
+mat2 rot(float a){ float c = cos(a), s = sin(a); return mat2(c,-s,s,c); }
+
+float sdCircle(vec2 p, float r){ return length(p) - r; }
+float sdBox(vec2 p, vec2 b){
+    vec2 q = abs(p) - b;
+    return length(max(q, 0.0)) + min(max(q.x, q.y), 0.0);
+}
+float sdRoundBox(vec2 p, vec2 b, float rad){
+    vec2 q = abs(p) - b + vec2(rad);
+    return length(max(q, 0.0)) - rad + min(max(q.x, q.y), 0.0);
+}
+
+// radial wavy circle: r' = r + amp * cos(n*theta + phase)
+float sdWavyCircle(vec2 p, float r, float n, float amp, float phase){
+    float theta = atan(p.y, p.x);
+    float modR = r + amp * cos(n * theta + phase);
+    return length(p) - modR;
+}
+
+// sharp star/burst: spikes via cos, sharpened by pow
+float sdStar(vec2 p, float r, float spikes, float spikeAmp, float phase){
+    float a = atan(p.y, p.x);
+    float m = cos(spikes * a + phase);
+    float spike = spikeAmp * sign(m) * pow(abs(m), 0.6);
+    return length(p) - (r + spike);
+}
+
+// smooth union (blend factor k)
+float opSmoothUnion(float a, float b, float k){
+    float h = clamp(0.5 + 0.5*(b-a)/k, 0.0, 1.0);
+    return mix(b, a, h) - k*h*(1.0-h);
+}
+
+// anti-aliased step (using screen-space derivative)
+float AA(float d){
+    float fw = fwidth(d);
+    return smoothstep(fw, -fw, d);
+}
+
+// ---------- Main animated shape SDF ----------
+// This function blends between two SDFs over time to create the morphing effect.
+float sdAnimatedMorph(vec2 p, float time){
+    // rotate slowly
+    float rotSpeed = 0.25;
+    p *= rot(time * rotSpeed);
+
+    // base radius
+    float baseR = 0.33;
+
+    // time-varying parameters
+    float t1 = sin(time * 1.2) * 0.5 + 0.5;           // 0..1 oscillator
+    float phase = time * 1.8;                         // rotates bumps
+    float ampCookie = mix(0.04, 0.10, t1);            // cookie amplitude
+    float nCookie = mix(6.0, 12.0, t1);               // cookie petals
+
+    float spikes = mix(10.0, 20.0, 1.0 - t1);         // burst spikes
+    float spikeAmp = mix(0.06, 0.16, 1.0 - t1);
+
+    // two SDFs
+    float wavy = sdWavyCircle(p, baseR, nCookie, ampCookie, phase);
+    float star = sdStar(p, baseR, spikes, spikeAmp, phase*0.6);
+
+    // smooth blend between them based on another slow oscillator
+    float blend = 0.5 + 0.5 * sin(time * 0.9 + 0.3);
+    float d = opSmoothUnion(wavy, star, 0.06 * (1.0 - blend) + 0.01);
+
+    // small inner indent to match the slightly flattened look in the reference
+    // (subtract a small flattened circle on bottom to get "pill-like" bottom)
+    float flatten = p.y + 0.05; // positive above, negative below
+    d = max(d, flatten);
+
+    return d;
+}
+
+// ---------- Fragment main ----------
+void main(){
+    // normalized coordinates centered at (0,0)
+    vec2 uv = (gl_FragCoord.xy - 0.5 * u_resolution.xy) / u_resolution.y;
+
+    // get SDF
+    float d = sdAnimatedMorph(uv, u_time);
+
+    // alpha with anti-aliasing
+    float a = AA(d);
+
+    // color setup (exact matches from the video)
+    vec3 shapeColor = vec3(76.0/255.0, 51.0/255.0, 122.0/255.0); // main purple
+    vec3 accent = vec3(133.0/255.0,108.0/255.0,180.0/255.0);    // accent (unused by default)
+    vec3 bg = vec3(244.0/255.0,237.0/255.0,249.0/255.0);        // pale background
+
+    // lighting-like subtle rim: compute approximate normal from SDF and add very small rim
+    vec2 eps = vec2(0.001, 0.0);
+    float dx = sdAnimatedMorph(uv + eps.xy, u_time) - sdAnimatedMorph(uv - eps.xy, u_time);
+    float dy = sdAnimatedMorph(uv + eps.yx, u_time) - sdAnimatedMorph(uv - eps.yx, u_time);
+    vec3 N = normalize(vec3(dx, dy, 0.0001));
+    float rim = pow(1.0 - max(0.0, dot(N, vec3(0.0,1.0,0.0))), 3.0) * 0.06;
+
+    // final color: mix background and shape
+    vec3 col = mix(bg, shapeColor + rim * accent, a);
+
+    gl_FragColor = vec4(col, 1.0);
+}
+#ifdef GL_ES
+precision mediump float;
+#endif
+
+uniform vec2 u_resolution;
+uniform float u_time;
+
+// ---------- Helpers ----------
+const float PI = 3.14159265358979323846;
+
+mat2 rot(float a){ float c = cos(a), s = sin(a); return mat2(c,-s,s,c); }
+
+float sdCircle(vec2 p, float r){ return length(p) - r; }
+float sdBox(vec2 p, vec2 b){
+    vec2 q = abs(p) - b;
+    return length(max(q, 0.0)) + min(max(q.x, q.y), 0.0);
+}
+float sdRoundBox(vec2 p, vec2 b, float rad){
+    vec2 q = abs(p) - b + vec2(rad);
+    return length(max(q, 0.0)) - rad + min(max(q.x, q.y), 0.0);
+}
+
+// radial wavy circle: r' = r + amp * cos(n*theta + phase)
+float sdWavyCircle(vec2 p, float r, float n, float amp, float phase){
+    float theta = atan(p.y, p.x);
+    float modR = r + amp * cos(n * theta + phase);
+    return length(p) - modR;
+}
+
+// sharp star/burst: spikes via cos, sharpened by pow
+float sdStar(vec2 p, float r, float spikes, float spikeAmp, float phase){
+    float a = atan(p.y, p.x);
+    float m = cos(spikes * a + phase);
+    float spike = spikeAmp * sign(m) * pow(abs(m), 0.6);
+    return length(p) - (r + spike);
+}
+
+// smooth union (blend factor k)
+float opSmoothUnion(float a, float b, float k){
+    float h = clamp(0.5 + 0.5*(b-a)/k, 0.0, 1.0);
+    return mix(b, a, h) - k*h*(1.0-h);
+}
+
+// anti-aliased step (using screen-space derivative)
+float AA(float d){
+    float fw = fwidth(d);
+    return smoothstep(fw, -fw, d);
+}
+
+// ---------- Main animated shape SDF ----------
+// This function blends between two SDFs over time to create the morphing effect.
+float sdAnimatedMorph(vec2 p, float time){
+    // rotate slowly
+    float rotSpeed = 0.25;
+    p *= rot(time * rotSpeed);
+
+    // base radius
+    float baseR = 0.33;
+
+    // time-varying parameters
+    float t1 = sin(time * 1.2) * 0.5 + 0.5;           // 0..1 oscillator
+    float phase = time * 1.8;                         // rotates bumps
+    float ampCookie = mix(0.04, 0.10, t1);            // cookie amplitude
+    float nCookie = mix(6.0, 12.0, t1);               // cookie petals
+
+    float spikes = mix(10.0, 20.0, 1.0 - t1);         // burst spikes
+    float spikeAmp = mix(0.06, 0.16, 1.0 - t1);
+
+    // two SDFs
+    float wavy = sdWavyCircle(p, baseR, nCookie, ampCookie, phase);
+    float star = sdStar(p, baseR, spikes, spikeAmp, phase*0.6);
+
+    // smooth blend between them based on another slow oscillator
+    float blend = 0.5 + 0.5 * sin(time * 0.9 + 0.3);
+    float d = opSmoothUnion(wavy, star, 0.06 * (1.0 - blend) + 0.01);
+
+    // small inner indent to match the slightly flattened look in the reference
+    // (subtract a small flattened circle on bottom to get "pill-like" bottom)
+    float flatten = p.y + 0.05; // positive above, negative below
+    d = max(d, flatten);
+
+    return d;
+}
+
+// ---------- Fragment main ----------
+void main(){
+    // normalized coordinates centered at (0,0)
+    vec2 uv = (gl_FragCoord.xy - 0.5 * u_resolution.xy) / u_resolution.y;
+
+    // get SDF
+    float d = sdAnimatedMorph(uv, u_time);
+
+    // alpha with anti-aliasing
+    float a = AA(d);
+
+    // color setup (exact matches from the video)
+    vec3 shapeColor = vec3(76.0/255.0, 51.0/255.0, 122.0/255.0); // main purple
+    vec3 accent = vec3(133.0/255.0,108.0/255.0,180.0/255.0);    // accent (unused by default)
+    vec3 bg = vec3(244.0/255.0,237.0/255.0,249.0/255.0);        // pale background
+
+    // lighting-like subtle rim: compute approximate normal from SDF and add very small rim
+    vec2 eps = vec2(0.001, 0.0);
+    float dx = sdAnimatedMorph(uv + eps.xy, u_time) - sdAnimatedMorph(uv - eps.xy, u_time);
+    float dy = sdAnimatedMorph(uv + eps.yx, u_time) - sdAnimatedMorph(uv - eps.yx, u_time);
+    vec3 N = normalize(vec3(dx, dy, 0.0001));
+    float rim = pow(1.0 - max(0.0, dot(N, vec3(0.0,1.0,0.0))), 3.0) * 0.06;
+
+    // final color: mix background and shape
+    vec3 col = mix(bg, shapeColor + rim * accent, a);
+
+    gl_FragColor = vec4(col, 1.0);
+}
