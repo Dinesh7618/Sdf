@@ -1116,3 +1116,345 @@ void main() {
 
     gl_FragColor = vec4(col, 1.0);
 }
+
+
+
+
+
+#ifdef GL_ES
+precision mediump float;
+#endif
+
+#define MAX_DIST 100.
+#define SURF_DIST .001
+
+uniform vec2 u_resolution;
+uniform float u_time;
+uniform vec2 u_mouse; // optional
+
+// new uniforms to control the cycle
+uniform float u_m;       // maximum height (m). If not set or <=0, DEFAULT_M is used.
+uniform float u_period;  // period (seconds) for 0->m->0 cycle. If not set or <=0, DEFAULT_PERIOD is used.
+
+// helpers
+float dot2(vec2 v) { return dot(v, v); }
+
+// Small helper: generate thin anti-aliased grid line value [0..1] for given world (or local) pos.xy
+// NOTE: 'pixelSize' should be the estimated world-space size of one pixel at the surface point.
+float meshLine(vec2 pos, float cell, float lineWidth, float pixelSize) {
+    vec2 f = fract(pos / cell);
+    float dx = min(f.x, 1.0 - f.x) * cell;
+    float dy = min(f.y, 1.0 - f.y) * cell;
+    float d = min(dx, dy);
+    float af = max(pixelSize, 1e-6);
+    return smoothstep(lineWidth + af, lineWidth, d);
+}
+
+// axis-aligned box SDF (finite box)
+float dBox(vec3 p, vec3 s) {
+    return length(max(abs(p) - s, 0.));
+}
+
+// Inverted Paraboloid SDF (finite "bell" that opens downward):
+// Surface: y = h - a*r^2  for 0 <= y <= h  (apex at y=h, rim at y=0, r=r_base).
+float sdParaboloidInverted(vec3 p, float a, float h) {
+    float r = length(p.xz);
+    float g = p.y - h + a * r * r;
+    float denom = sqrt(1.0 + 4.0 * a * a * r * r);
+    float sd_lateral = g / denom;
+    float sd_top = p.y - h;
+    float sd_bottom = -p.y;
+    return max(sd_lateral, max(sd_top, sd_bottom));
+}
+
+// Smooth minimum (blend variant). returns smooth-min and sets weight w (0->b,1->a)
+float smin_blend(float a, float b, float k, out float w) {
+    k = max(k, 1e-6);
+    w = clamp(0.5 + 0.5 * (b - a) / k, 0.0, 1.0);
+    return mix(b, a, w) - k * w * (1.0 - w);
+}
+
+// Analytic normal for inverted paraboloid local point (lp in paraboloid local space).
+vec3 paraboloidNormalAnalytic(vec3 lp, float a) {
+    vec3 g = vec3(2.0 * a * lp.x, 1.0, 2.0 * a * lp.z);
+    return normalize(g);
+}
+
+// Scene constants (baseline)
+const float SHEET_Y = 1.0;
+const float SHEET_HALF_THICKNESS = 0.02;
+const vec3 SHEET_CENTER = vec3(0.0, SHEET_Y, 6.0);
+// small sheet (half-sizes) — you already asked to reduce these earlier
+const vec3 SHEET_HALF_SIZE = vec3(4.0, SHEET_HALF_THICKNESS, 3.0);
+
+// ORIGINAL paraboloid params (for ratio when animating)
+const float PAR_H0 = 1.4;
+const float PAR_RBASE0 = 0.8;
+
+// placement (used to build basePos for each paraboloid)
+const float ZPOS = 6.0;
+const float SPACING = 3.0;
+const float STARTX = -6.0;
+const int PAR_COUNT = 5;
+
+// smoothing radius between each paraboloid and the sheet (tweak to taste)
+const float SMOOTH_K = 0.09;
+
+// unified material color (sheet baseline)
+const vec3 BASE_COLOR = vec3(0.15, 0.2, 0.24);
+
+// Mesh overlay tuning (very small cell + thin lines)
+const float MESH_CELL = 0.04;
+const float MESH_LINE_WIDTH = 0.0025;
+const float MESH_STRENGTH = 0.88;
+const vec3  MESH_COLOR = vec3(0.18, 0.45, 0.95);
+
+// Default fallbacks if uniforms aren't provided
+const float DEFAULT_M = PAR_H0;
+const float DEFAULT_PERIOD = 4.0;
+
+// epsilon to decide "no paraboloid"
+const float PAR_EPS = 1e-5;
+
+// Solve ray ↔ inverted paraboloid lateral (quadratic) and rim cap.
+// Returns whether any valid hit found and writes nearest positive t to outT,
+// local point (relative to basePos) to outLocalP, and which primitive hit via outKind:
+// outKind: 0 = lateral, 1 = rim-cap (y=0)
+bool intersectParaboloid(vec3 ro, vec3 rd, vec3 basePos, float h, float rbase, out float outT, out vec3 outLocalP, out int outKind) {
+    outT = 1e20;
+    outKind = -1;
+    // local ray origin
+    vec3 r0 = ro - basePos;
+
+    // coefficients: A t^2 + B t + C = 0
+    float a_coef = (h > PAR_EPS) ? (h / max(rbase * rbase, 1e-6)) : 0.0; // this 'a' is same as earlier (par_h / r^2)
+    // if a_coef is zero, no lateral surface (degenerate)
+    if (a_coef > 1e-8) {
+        float A = a_coef * (rd.x * rd.x + rd.z * rd.z);
+        float B = 2.0 * a_coef * (r0.x * rd.x + r0.z * rd.z) + rd.y;
+        float C = a_coef * (r0.x * r0.x + r0.z * r0.z) + r0.y - h;
+
+        // solve quadratic (allow degenerate when A ~ 0)
+        if (abs(A) > 1e-8) {
+            float disc = B * B - 4.0 * A * C;
+            if (disc >= 0.0) {
+                float sd = sqrt(disc);
+                float t1 = (-B - sd) / (2.0 * A);
+                float t2 = (-B + sd) / (2.0 * A);
+                // check both roots (we want the smallest positive with local y in [0,h])
+                float ts[2];
+                ts[0] = t1; ts[1] = t2;
+                for (int i = 0; i < 2; i++) {
+                    float t = ts[i];
+                    if (t <= 1e-5) continue;
+                    vec3 p = ro + rd * t;
+                    vec3 lp = p - basePos; // local point
+                    if (lp.y >= -1e-4 && lp.y <= h + 1e-4) {
+                        // valid lateral hit
+                        if (t < outT) {
+                            outT = t;
+                            outLocalP = lp;
+                            outKind = 0;
+                        }
+                    }
+                }
+            }
+        } else {
+            // linear case: B t + C = 0
+            if (abs(B) > 1e-8) {
+                float t = -C / B;
+                if (t > 1e-5) {
+                    vec3 p = ro + rd * t;
+                    vec3 lp = p - basePos;
+                    if (lp.y >= -1e-4 && lp.y <= h + 1e-4) {
+                        outT = t;
+                        outLocalP = lp;
+                        outKind = 0;
+                    }
+                }
+            }
+        }
+    }
+
+    // rim (bottom cap) intersection: y = basePos.y  (local y = 0) inside radius rbase
+    if (abs(rd.y) > 1e-6) {
+        float tcap = (basePos.y - ro.y) / rd.y;
+        if (tcap > 1e-5) {
+            vec3 pcap = ro + rd * tcap;
+            vec2 localXZ = (pcap.xz - basePos.xz);
+            if (length(localXZ) <= rbase + 1e-5) {
+                if (tcap < outT) {
+                    outT = tcap;
+                    outLocalP = vec3(pcap - basePos);
+                    outKind = 1;
+                }
+            }
+        }
+    }
+
+    return (outKind >= 0);
+}
+
+void main() {
+    vec2 fragCoord = gl_FragCoord.xy;
+    vec2 uv = (fragCoord - 0.5 * u_resolution.xy) / u_resolution.y;
+
+    // Camera: more top-down
+    vec3 ro = vec3(0.0, 6.5, 0.0);
+    vec3 lookAt = vec3(0.0, 1.0, 6.0);
+    vec3 forward = normalize(lookAt - ro);
+    vec3 worldUp = vec3(0.0, 1.0, 0.0);
+    vec3 right = normalize(cross(forward, worldUp));
+    vec3 up = cross(right, forward);
+
+    float fov = 0.75;
+    vec3 rd = normalize(forward + uv.x * right * fov + uv.y * up * fov);
+
+    // --- animation state (controls par_h and par_rbase like your previous shader) ---
+    float maxM = (u_m > 1e-6) ? u_m : DEFAULT_M;
+    float period = (u_period > 1e-6) ? u_period : DEFAULT_PERIOD;
+    float phase = u_time * 3.14159265 / period;
+    float animT = abs(sin(phase));         // 0 -> 1 -> 0
+    float par_h_anim = maxM * animT;
+    float par_rbase_anim = (par_h_anim > 1e-6) ? par_h_anim * (PAR_RBASE0 / PAR_H0) : 0.0;
+
+    // We'll test analytic intersections with each paraboloid (positions laid out with STARTX/SPACING),
+    // and also the sheet top plane.
+    float nearestT = 1e20;
+    bool hit = false;
+    vec3 hitP = vec3(0.0);
+    vec3 hitNormal = vec3(0.0, 1.0, 0.0);
+    int hitKind = -1; // 0=parab lateral,1=parab rim,2=sheet plane
+    vec3 hitLocalP = vec3(0.0);
+    float hitParH = 0.0;
+    float hitParR = 0.0;
+
+    // sheet top plane
+    float sheetTopY = SHEET_CENTER.y + SHEET_HALF_THICKNESS;
+    if (abs(rd.y) > 1e-6) {
+        float tPlane = (sheetTopY - ro.y) / rd.y;
+        if (tPlane > 1e-5) {
+            vec3 pplane = ro + rd * tPlane;
+            // check if inside sheet rect
+            vec3 localXZ = pplane - SHEET_CENTER;
+            if (abs(localXZ.x) <= SHEET_HALF_SIZE.x + 1e-6 && abs(localXZ.z) <= SHEET_HALF_SIZE.z + 1e-6) {
+                nearestT = tPlane;
+                hit = true;
+                hitP = pplane;
+                hitNormal = vec3(0.0, 1.0, 0.0);
+                hitKind = 2;
+                hitLocalP = vec3(pplane - vec3(0.0, sheetTopY, 0.0)); // not used for sheet mesh but keep consistent
+                hitParH = 0.0;
+                hitParR = 0.0;
+            }
+        }
+    }
+
+    // check each paraboloid (same placement as before)
+    for (int i = 0; i < PAR_COUNT; i++) {
+        float x = STARTX + SPACING * float(i);
+        vec3 basePos = vec3(x, sheetTopY, ZPOS);
+
+        // animated params
+        float par_h = par_h_anim;
+        float par_rbase = par_rbase_anim;
+
+        // ignore very small
+        if (par_h <= PAR_EPS) continue;
+
+        float tPar; vec3 localP; int kind;
+        if (intersectParaboloid(ro, rd, basePos, par_h, par_rbase, tPar, localP, kind)) {
+            if (tPar < nearestT && tPar > 1e-5) {
+                // accept
+                nearestT = tPar;
+                hit = true;
+                hitP = ro + rd * tPar;
+                hitLocalP = localP;
+                hitKind = kind == 0 ? 0 : 1; // lateral or rim
+                hitParH = par_h;
+                hitParR = par_rbase;
+                // normal computed below after chosen parab params
+            }
+        }
+    }
+
+    vec3 col = vec3(0.0);
+
+    if (!hit) {
+        // nothing hit -> outside -> black (as requested)
+        col = vec3(0.0);
+        gl_FragColor = vec4(col, 1.0);
+        return;
+    }
+
+    // Now compute normal & shading at hitP
+    if (hitKind == 2) {
+        // sheet plane hit
+        hitNormal = vec3(0.0, 1.0, 0.0);
+    } else if (hitKind == 0) {
+        // paraboloid lateral analytic normal (local)
+        float a_local = (hitParR > 1e-6) ? (hitParH / (hitParR * hitParR)) : 0.0;
+        hitNormal = paraboloidNormalAnalytic(hitLocalP, a_local);
+    } else if (hitKind == 1) {
+        // rim cap: normal is -y (pointing down)
+        hitNormal = vec3(0.0, -1.0, 0.0);
+    }
+
+    // lighting
+    vec3 lightPos = vec3(0.0, 6.0, 6.0);
+    vec3 l = normalize(lightPos - hitP);
+    vec3 viewDir = normalize(ro - hitP);
+    vec3 halfVec = normalize(l + viewDir);
+    float ambient = 0.18;
+    float dif = clamp(dot(hitNormal, l), 0.0, 1.0);
+
+    // compute geometry blend weight geoW via smin_blend of signed distances
+    float distSheet = dBox(hitP - SHEET_CENTER, SHEET_HALF_SIZE);
+    float a_for_sd = (hitParR > 1e-6) ? (hitParH / (hitParR * hitParR)) : 0.0;
+    float distPar = sdParaboloidInverted(hitLocalP, a_for_sd, hitParH);
+    float geoW;
+    smin_blend(distPar, distSheet, SMOOTH_K, geoW);
+    geoW = clamp(geoW, 0.0, 1.0);
+
+    // dynamic paraboloid-only color
+    float topRef = (u_m > 1e-6) ? u_m : DEFAULT_M;
+    float colorFactor = (topRef > 1e-6 && hitParH > 0.0) ? clamp(hitParH / topRef, 0.0, 1.0) : 0.0;
+    vec3 warmOrange = vec3(1.0, 0.6, 0.2);
+    float blendAmt = smoothstep(0.0, 1.0, colorFactor);
+    vec3 dynamicParColor = mix(BASE_COLOR, warmOrange, blendAmt * 0.9) + vec3(0.04) * blendAmt;
+
+    // blended base color only where paraboloid contributes (geoW)
+    vec3 baseCol = mix(BASE_COLOR, dynamicParColor, geoW);
+
+    // specular strength varying with paraboloid weight/height
+    float specPow = 64.0;
+    float specStrengthPar = mix(0.6, 1.0, blendAmt * 0.6);
+    float specStrength = mix(0.6, specStrengthPar, geoW);
+    float spec = pow(max(dot(hitNormal, halfVec), 0.0), specPow) * specStrength;
+
+    vec3 lit = baseCol * (ambient + dif * 0.86) + vec3(1.0) * spec;
+
+    // slight paraboloid-weighted tint
+    float heightDenom = max(2.0 * hitParH, 1e-6);
+    float heightTint = (hitParH > 1e-6) ? clamp((hitP.y - SHEET_Y) / heightDenom, 0.0, 1.0) : 0.0;
+    vec3 tint = mix(vec3(0.98), vec3(0.92), heightTint) * 0.02 * geoW;
+
+    col = pow(lit + tint, vec3(1.0 / 2.2));
+
+    // Mesh overlay (sheet uses world xz, parab uses local xz). AA via pixelWorldSize estimate
+    float distToCam = length(ro - hitP);
+    float pixelWorldSize = (fov * distToCam) / u_resolution.y;
+
+    float sheetMesh = meshLine(hitP.xz, MESH_CELL, MESH_LINE_WIDTH, pixelWorldSize);
+    float paraMesh  = meshLine(hitLocalP.xz, MESH_CELL, MESH_LINE_WIDTH, pixelWorldSize);
+    float meshVal = mix(sheetMesh, paraMesh, geoW);
+    col = mix(col, MESH_COLOR, meshVal * MESH_STRENGTH);
+
+    // Make everything outside the sheet footprint black (same as before)
+    vec3 localXZ = hitP - SHEET_CENTER;
+    if (abs(localXZ.x) > SHEET_HALF_SIZE.x || abs(localXZ.z) > SHEET_HALF_SIZE.z) {
+        col = vec3(0.0);
+    }
+
+    gl_FragColor = vec4(col, 1.0);
+}
